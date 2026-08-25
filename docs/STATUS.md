@@ -33,7 +33,7 @@ Phase 0 - python model (done 8/24)
       (2b7e...4f3c / 3243...0734 -> 3925841d02dc09fbdc118597196a0b32)
 
 Phase 1 - core RTL
-- [ ] sbox.sv + tb (check all 256 entries against the model)
+- [x] sbox.sv + tb (check all 256 entries against the model) (8/24)
 - [ ] key_expand.sv + tb (all 11 round keys vs fips197_roundkeys.txt)
 - [ ] round function (subbytes/shiftrows/mixcolumns/addroundkey)
 - [ ] aes_core.sv - FSM + top level
@@ -58,3 +58,9 @@ Phase 4 - timing + writeup
 
 - 8/24: Phase 0 done. Model + vectors verified against FIPS-197 Appendix A/B
   and pycryptodome. Next up is sbox.sv and its testbench.
+- 8/24: sbox.sv done, tb passes all 256 entries in xsim (Vivado 2019.2 cli
+  flow: xvlog -sv / xelab / xsim -R from the repo root). Next: key_expand.sv.
+- 8/24: added vivado/create_project.tcl so the sims also run from the vivado
+  gui (project lands in vivado/aes128, gitignored). verified tb_sbox passes
+  there too. note: the gui sim prints a warning about vectors/sbox.txt - that's
+  just the tb falling back to the copied sbox.txt, it's fine.
