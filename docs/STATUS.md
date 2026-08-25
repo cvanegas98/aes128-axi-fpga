@@ -64,6 +64,6 @@ Phase 4 - timing + writeup
   gui (project lands in vivado/aes128, gitignored). verified tb_sbox passes
   there too. note: the gui sim prints a warning about vectors/sbox.txt - that's
   just the tb falling back to the copied sbox.txt, it's fine.
-- 8/24: key_expand.sv done - computes one round key per cycle after start,
+- 8/25: key_expand.sv done - computes one round key per cycle after start,
   done after 10 cycles. tb checks all 11 keys against appendix a, twice in a
   row to make sure start can rerun. next: the round function.
