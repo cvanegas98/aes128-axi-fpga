@@ -34,7 +34,7 @@ Phase 0 - python model (done 8/24)
 
 Phase 1 - core RTL
 - [x] sbox.sv + tb (check all 256 entries against the model) (8/24)
-- [ ] key_expand.sv + tb (all 11 round keys vs fips197_roundkeys.txt)
+- [x] key_expand.sv + tb (all 11 round keys vs fips197_roundkeys.txt) (8/24)
 - [ ] round function (subbytes/shiftrows/mixcolumns/addroundkey)
 - [ ] aes_core.sv - FSM + top level
 - [ ] core tb: FIPS KAT + random_1000.txt
@@ -64,3 +64,6 @@ Phase 4 - timing + writeup
   gui (project lands in vivado/aes128, gitignored). verified tb_sbox passes
   there too. note: the gui sim prints a warning about vectors/sbox.txt - that's
   just the tb falling back to the copied sbox.txt, it's fine.
+- 8/24: key_expand.sv done - computes one round key per cycle after start,
+  done after 10 cycles. tb checks all 11 keys against appendix a, twice in a
+  row to make sure start can rerun. next: the round function.
