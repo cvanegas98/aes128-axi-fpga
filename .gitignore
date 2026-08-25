@@ -1,3 +1,22 @@
+# Vivado
+*.jou
+*.log
+*.str
+*.xpr
+.Xil/
+vivado_project/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/backup/
+.gen/
+
+# Waveforms
+*.wdb
+*.vcd
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
