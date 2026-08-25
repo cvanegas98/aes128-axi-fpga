@@ -13,6 +13,14 @@ vivado_project/
 *.srcs/backup/
 .gen/
 
+# generated vivado project (recreate with vivado/create_project.tcl)
+vivado/aes128/
+
+# xsim run from the command line
+xsim.dir/
+*.pb
+webtalk*
+
 # Waveforms
 *.wdb
 *.vcd

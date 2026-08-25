@@ -1,6 +1,7 @@
 """Generates the test vector files the SystemVerilog testbenches read.
 
 Writes into vectors/:
+  sbox.txt               - the 256 sbox values (for the sbox tb)
   fips197_kat.txt        - the FIPS-197 Appendix B known answer vector
   fips197_roundkeys.txt  - 11 round keys for the Appendix A key (for the key_expand tb)
   random_1000.txt        - random vectors, seeded so the files are reproducible
@@ -18,7 +19,7 @@ import argparse
 import random
 from pathlib import Path
 
-from aes_ref import encrypt_block, expand_key
+from aes_ref import SBOX, encrypt_block, expand_key
 
 FIPS_KEY = "2b7e151628aed2a6abf7158809cf4f3c"
 FIPS_PT = "3243f6a8885a308d313198a2e0370734"
@@ -40,6 +41,10 @@ def main():
     args = ap.parse_args()
 
     VECTORS_DIR.mkdir(exist_ok=True)
+
+    # sbox table, one hex byte per line, for $readmemh in the sbox tb
+    (VECTORS_DIR / "sbox.txt").write_text("".join(f"{b:02x}\n" for b in SBOX))
+    print("wrote sbox.txt")
 
     # FIPS-197 known answer vector
     kat = vector_line(bytes.fromhex(FIPS_KEY), bytes.fromhex(FIPS_PT))
