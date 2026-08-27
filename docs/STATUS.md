@@ -42,9 +42,10 @@ Phase 1 - core RTL
 - [x] core tb: FIPS KAT + random_1000.txt (8/26)
 
 Phase 2 - AXI4-Lite wrapper
-- [ ] register map written down in docs/
-- [ ] AXI4-Lite slave wrapper in rtl/axi/
-- [ ] AXI testbench (BFM or Vivado AXI VIP)
+- [x] register map written down in docs/register_map.md (8/27)
+- [x] AXI4-Lite slave wrapper in rtl/axi/aes_axi_lite.sv (8/27)
+- [x] AXI testbench (hand written BFM) (8/27)
+- [ ] maybe: run the Vivado AXI VIP against it too as a cross check
 
 Phase 3 - hardware demo (first thing to cut)
 - [ ] UART to AXI bridge (reuse UART from my old project)
@@ -97,3 +98,24 @@ Phase 4 - timing + writeup
   sanity checked the tb by breaking the last round mixcolumns skip in a
   scratch copy, it failed like it should.
   next: phase 2, write the register map down first then the axi4-lite slave.
+- 8/27: phase 2 done. wrote docs/register_map.md first, then built
+  rtl/axi/aes_axi_lite.sv against it. 14 registers in a 64 byte aperture,
+  ctrl/status/4x key/4x din/4x dout. ctrl's key_load and start are write 1 to
+  pulse so software doesn't have to set the bit and clear it again. wstrb is
+  honored on the key and din registers. irq is just done & irq_en, no
+  separate w1c status register - one interrupt source didn't seem worth it.
+  tb has a hand written axi4-lite bfm instead of the vivado vip, keeps the
+  ip dependency out of the project. covers register readback, byte enables,
+  the ctrl ignore rules, read only + unmapped addresses, the irq, 100
+  vectors through the bus and a key reuse run. passes in xsim.
+  bfm gotcha: awready/wready are combinational off *valid, so the handshake
+  has to be sampled with the pre edge values - reading them after a #1 sees
+  the post edge state and misses the handshake completely.
+  the good one: mutation tested the tb by breaking things in a scratch copy.
+  ignoring wstrb got caught, but swapping the ctrl bit priority did NOT -
+  my test wrote both bits while key_ready was still 0, so start was gated
+  off anyway and either priority passed. rewrote it to load a key first,
+  now it catches the swap. lesson is a test that can't fail isn't a test.
+  also: create_project.tcl only globbed rtl/*.sv so it missed rtl/axi,
+  added a second glob. re-source it to pick the wrapper up in the gui.
+  next: phase 3, uart to axi bridge (reuse the uart from my old project).
