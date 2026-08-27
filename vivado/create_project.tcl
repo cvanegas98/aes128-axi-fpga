@@ -22,4 +22,8 @@ add_files -fileset sim_1 [glob [file join $repo vectors *.txt]]
 
 set_property top tb_sbox [get_filesets sim_1]
 
+# run until the tb calls $finish instead of the default 1000ns - tb_aes_core
+# needs ~260us to get through all 1000 vectors
+set_property -name {xsim.simulate.runtime} -value {all} -objects [get_filesets sim_1]
+
 puts "done. open [file join $repo vivado aes128 aes128.xpr] and hit Run Simulation."

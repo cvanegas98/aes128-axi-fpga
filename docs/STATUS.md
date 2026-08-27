@@ -38,8 +38,8 @@ Phase 1 - core RTL
 - [x] round function: subbytes.sv, shiftrows.sv, mixcolumns.sv + tbs checked
       against the model (addroundkey is just an xor, doing it inline in
       aes_core) (8/25)
-- [ ] aes_core.sv - FSM + top level
-- [ ] core tb: FIPS KAT + random_1000.txt
+- [x] aes_core.sv - FSM + top level (8/26)
+- [x] core tb: FIPS KAT + random_1000.txt (8/26)
 
 Phase 2 - AXI4-Lite wrapper
 - [ ] register map written down in docs/
@@ -78,3 +78,22 @@ Phase 4 - timing + writeup
   xor so it'll live inline in aes_core. note: re-source
   vivado/create_project.tcl to pull the new files into the gui project.
   next: aes_core.sv (fsm + top level).
+- 8/26: aes_core.sv done. 3 state fsm (idle/expand/round), one copy of
+  subbytes/shiftrows/mixcolumns reused every cycle, addroundkey inline.
+  went with separate key_load and start pulses instead of one start that
+  does both - key expansion costs as many cycles as an encryption, so
+  re-expanding per block would double the work for the load-key-once case
+  the axi wrapper wants. tb passes the fips kat + all 1000 random vectors +
+  a key reuse test (one key_load, three blocks back to back) = 1004 blocks.
+  also checked the latency: 10 cycles from start being sampled to done,
+  since the round 0 addroundkey happens on the same edge that accepts
+  start. block rate is still 11 cycles because start isn't accepted until
+  the cycle after done.
+  a snag I hit writing the tb: done and key_ready both stay high until the
+  next start, so waiting on the level passes instantly off the last run.
+  had to wait on the posedge instead. tb_key_expand has the same bug but it
+  gets away with it since both its runs use the same key - worth fixing when
+  I touch it again.
+  sanity checked the tb by breaking the last round mixcolumns skip in a
+  scratch copy, it failed like it should.
+  next: phase 2, write the register map down first then the axi4-lite slave.
