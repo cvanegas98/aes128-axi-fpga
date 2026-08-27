@@ -35,7 +35,9 @@ Phase 0 - python model (done 8/24)
 Phase 1 - core RTL
 - [x] sbox.sv + tb (check all 256 entries against the model) (8/24)
 - [x] key_expand.sv + tb (all 11 round keys vs fips197_roundkeys.txt) (8/24)
-- [ ] round function (subbytes/shiftrows/mixcolumns/addroundkey)
+- [x] round function: subbytes.sv, shiftrows.sv, mixcolumns.sv + tbs checked
+      against the model (addroundkey is just an xor, doing it inline in
+      aes_core) (8/25)
 - [ ] aes_core.sv - FSM + top level
 - [ ] core tb: FIPS KAT + random_1000.txt
 
@@ -67,3 +69,12 @@ Phase 4 - timing + writeup
 - 8/25: key_expand.sv done - computes one round key per cycle after start,
   done after 10 cycles. tb checks all 11 keys against appendix a, twice in a
   row to make sure start can rerun. next: the round function.
+- 8/25: round function done. subbytes/shiftrows/mixcolumns as separate
+  combinational modules, all three tbs pass in xsim (500 states each). added
+  vectors/roundstep.txt to gen_vectors.py - one file with state + expected
+  output of each step applied independently, so the three tbs share it. first
+  few states are edge cases plus the appendix b round 1 input so I could
+  eyeball the subbytes output against the spec table. addroundkey is just an
+  xor so it'll live inline in aes_core. note: re-source
+  vivado/create_project.tcl to pull the new files into the gui project.
+  next: aes_core.sv (fsm + top level).

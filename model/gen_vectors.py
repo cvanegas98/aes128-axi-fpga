@@ -5,12 +5,18 @@ Writes into vectors/:
   fips197_kat.txt        - the FIPS-197 Appendix B known answer vector
   fips197_roundkeys.txt  - 11 round keys for the Appendix A key (for the key_expand tb)
   random_1000.txt        - random vectors, seeded so the files are reproducible
+  roundstep.txt          - per-step vectors for the subbytes/shiftrows/mixcolumns tbs
 
 Vector file format is one vector per line, three 32-digit hex values:
   <key> <plaintext> <ciphertext>
 which the testbench reads with $fscanf(fd, "%h %h %h", key, pt, ct).
 
 The roundkeys file is just 11 lines of 32-digit hex, rk[0] (= the key) first.
+
+roundstep.txt is four 32-digit hex values per line:
+  <state> <subbytes(state)> <shiftrows(state)> <mixcolumns(state)>
+each transform applied to the same input state independently, so one file
+covers all three module testbenches.
 
 usage: python gen_vectors.py [-n N] [--seed S]
 """
@@ -19,7 +25,7 @@ import argparse
 import random
 from pathlib import Path
 
-from aes_ref import SBOX, encrypt_block, expand_key
+from aes_ref import SBOX, encrypt_block, expand_key, mix_columns, shift_rows, sub_bytes
 
 FIPS_KEY = "2b7e151628aed2a6abf7158809cf4f3c"
 FIPS_PT = "3243f6a8885a308d313198a2e0370734"
@@ -65,6 +71,20 @@ def main():
         lines.append(vector_line(rng.randbytes(16), rng.randbytes(16)))
     (VECTORS_DIR / f"random_{args.n}.txt").write_text("\n".join(lines[:args.n]) + "\n")
     print(f"wrote random_{args.n}.txt (seed={args.seed})")
+
+    # per-step vectors for the round function modules. same edge cases, plus
+    # the round 1 input state from appendix b so I can eyeball the tb output
+    # against the spec table, then random states
+    states = edge + [bytes.fromhex("193de3bea0f4e22b9ac68d2ae9f84808")]
+    while len(states) < 500:
+        states.append(rng.randbytes(16))
+    step_lines = []
+    for s in states:
+        s = list(s)
+        step_lines.append(f"{bytes(s).hex()} {bytes(sub_bytes(s)).hex()} "
+                          f"{bytes(shift_rows(s)).hex()} {bytes(mix_columns(s)).hex()}")
+    (VECTORS_DIR / "roundstep.txt").write_text("\n".join(step_lines) + "\n")
+    print("wrote roundstep.txt")
 
 
 if __name__ == "__main__":
