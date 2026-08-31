@@ -50,7 +50,9 @@ Phase 2 - AXI4-Lite wrapper
       the IP dependency out
 
 Phase 3 - hardware demo (first thing to cut)
-- [ ] UART to AXI bridge (reuse UART from my old project)
+- [x] uart_rx.sv + uart_tx.sv + tbs (8/31) - had to write these, see the log
+- [ ] UART to AXI bridge (command protocol + AXI4-Lite master)
+- [ ] top level tying uart + bridge + aes_axi_lite together
 - [ ] basys3.xdc + vivado build script
 - [ ] demo on the board
 
@@ -233,3 +235,41 @@ Phase 4 - timing + writeup
   readme rather than a todo - if I ever want the third opinion it's a gui
   job, not a blocker.
   phase 2 is done. next: phase 3, uart to axi bridge.
+- 8/31 (session 4): started phase 3. first thing: the plan has said "reuse
+  the uart from my old project" since 8/24 and that was wrong - the old uart
+  is embedded C for a tm4c, not rtl. nothing to port, so it's written from
+  scratch. correcting it here so the checklist stops lying.
+  uart_rx.sv and uart_tx.sv, 8N1, 100 MHz / 115200 = 868 clocks per bit.
+  - rx has a two flop synchronizer on the input. rx is asynchronous to the
+    100 MHz clock and without it a transition near the clock edge can go
+    metastable, which shows up as byte corruption that never repeats the
+    same way twice. that's the failure that looks like a broken cipher and
+    isn't, so it's worth the two flops.
+  - rx catches the start edge, waits half a bit, and rechecks the line is
+    still low before committing - a glitch is not a start bit.
+  - framing error output when the stop bit isn't high, which is what a wrong
+    baud divisor looks like from the board end.
+  tbs: the stimulus for tb_uart_rx is bit banged straight from the 8N1
+  definition and tb_uart_tx decodes with its own bit banged decoder. neither
+  one uses the other module. if I'd driven the receiver with my own
+  transmitter, a shared misunderstanding (lsb vs msb first is the obvious
+  one) would cancel out and both would pass while both were wrong - same
+  trap as the axi bfm agreeing with the axi slave because I wrote both.
+  mutation tested, 7 mutants all killed: rx msb first, rx skipping the mid
+  bit recheck, rx sampling at the bit edge, rx ignoring the stop bit, tx msb
+  first, tx bit period off by one, tx letting send stomp a byte in flight.
+  the one worth writing down: "rx samples at the edge instead of mid bit"
+  survived everything until I added a baud tolerance test. with perfectly
+  timed stimulus, mid bit and edge sampling are identical - the mid bit
+  logic only earns its keep when the sender's baud is off. added a test that
+  sends at +/-4% and it caught the mutant immediately. so the tolerance test
+  isn't a nicety, it's the only thing testing the sampling point at all.
+  also measured the real divisor in the tb: 8.68us per bit at
+  CLKS_PER_BIT=868, which is 115200 baud.
+  next: the bridge. plan is a command protocol over serial - 'K' + 16 bytes
+  loads a key, 'E' + 16 bytes encrypts and returns 16 bytes, 'S' reads
+  status. that's literally the "how software drives it" sequence out of
+  docs/register_map.md, in hardware, and it demos the key reuse case the
+  separate key_load/start exists for. the bridge is also a second, real rtl
+  axi master to run against the slave, which is a better cross check than
+  the bfm alone.

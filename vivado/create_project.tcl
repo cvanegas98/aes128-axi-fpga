@@ -12,8 +12,11 @@ set repo [file normalize [file join [file dirname [info script]] ..]]
 
 create_project aes128 [file join $repo vivado aes128] -part xc7a35tcpg236-1 -force
 
-# rtl. the axi wrapper lives in its own subdir so it needs its own glob
-add_files [glob [file join $repo rtl *.sv] [file join $repo rtl axi *.sv]]
+# rtl. the axi wrapper and the uart live in their own subdirs, so each needs
+# its own glob - a plain rtl/*.sv silently misses them
+add_files [glob [file join $repo rtl *.sv] \
+                [file join $repo rtl axi *.sv] \
+                [file join $repo rtl uart *.sv]]
 
 # testbenches + vector files. vivado copies the txt files into the sim
 # working dir so $readmemh finds them by bare filename
