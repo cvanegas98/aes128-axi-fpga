@@ -45,7 +45,9 @@ Phase 2 - AXI4-Lite wrapper
 - [x] register map written down in docs/register_map.md (8/27)
 - [x] AXI4-Lite slave wrapper in rtl/axi/aes_axi_lite.sv (8/27)
 - [x] AXI testbench (hand written BFM) (8/27)
-- [ ] maybe: run the Vivado AXI VIP against it too as a cross check
+- [x] protocol assertions + channel skew/stall soak (8/31) - this is what
+      the VIP cross check was for, doing it with assertions instead keeps
+      the IP dependency out
 
 Phase 3 - hardware demo (first thing to cut)
 - [ ] UART to AXI bridge (reuse UART from my old project)
@@ -196,3 +198,38 @@ Phase 4 - timing + writeup
   next: phase 3, uart to axi bridge. the bfm stall/skew work (AW before W,
   delayed BREADY/RREADY) and the vivado vip cross check are still open and
   should happen before I call the axi wrapper done.
+- 8/31 (session 3): closed out the axi verification. the thing that bugged
+  me was that the bfm and the wrapper are both mine, written against the
+  same mental model, so they agree with each other whether or not the model
+  matches the spec. two fixes for that:
+  - a block of protocol assertions that watch the wires instead of trusting
+    either side: VALID holds until READY on B and R, the payload under a
+    waiting VALID doesn't move, nothing responds during reset, and no
+    response appears without a request behind it (outstanding counters).
+    they also police my own master - AW/W/AR held stable until their READY.
+    checked against IHI 0022 A3.2, not against what my bfm happens to do.
+  - the bfm drives each channel from its own thread now, so tests can put
+    the address up before the data or vice versa and can dawdle before
+    accepting a response. delays default to 0 so every existing directed
+    test drives the bus exactly like it did; rand_delays skews and stalls
+    every transaction, status polls and dout reads included.
+  new tests: directed skew matrix (data before address, address before
+  data, slow BREADY, slow RREADY, all four assembled into a real KAT block
+  that still encrypts right), and a 25 vector soak with everything
+  randomized. 131 blocks over the bus total now.
+  mutation checked the assertions themselves, since an assertion that never
+  fires is just decoration: BVALID dropping early, RVALID dropping early,
+  RDATA tracking the register while RVALID waits, and a spurious BVALID
+  with nothing outstanding are all caught, each by the specific assertion
+  meant for it. also broke my own bfm (moved AWADDR while AWVALID was
+  waiting) and the master side assertions caught that, which is the point.
+  reran the soak under -sv_seed 7 / 99 / 4242 so it isn't passing on one
+  lucky pattern. note $urandom(seed) doesn't exist in 2019.2, only
+  $urandom_range - xsim seeds the same way every run unless you pass
+  -sv_seed, so the default run reproduces as is.
+  not doing the vivado axi vip. the assertions give the independent opinion
+  that was the whole reason to want it, and the vip drags the ip dependency
+  into the project that I avoided on purpose. worth a paragraph in the
+  readme rather than a todo - if I ever want the third opinion it's a gui
+  job, not a blocker.
+  phase 2 is done. next: phase 3, uart to axi bridge.

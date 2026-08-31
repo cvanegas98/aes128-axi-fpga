@@ -16,6 +16,14 @@
 // @(posedge clk) with no delay - adding a #1 would see the post-edge state
 // and miss the handshake entirely.
 //
+// The BFM drives each channel from its own thread, so a test can put the
+// address up before the data or the other way round, and can be slow to
+// accept a response. Delays are 0 by default; rand_delays skews every
+// transaction. Separately there's a block of protocol assertions that watch
+// the bus against the spec rather than against the BFM - see the note on
+// them below, they're the answer to "the master and the slave are both mine
+// so of course they agree".
+//
 // gui: set tb_aes_axi_lite as sim top, Run All (not Run Simulation, the
 // default 1000ns isn't enough). or from the repo root:
 //   xvlog -sv rtl/sbox.sv rtl/subbytes.sv rtl/shiftrows.sv rtl/mixcolumns.sv
@@ -29,6 +37,11 @@
 module tb_aes_axi_lite;
 
     localparam int N_RANDOM = 100;   // bump this if I want a longer soak
+    // vectors run with randomized skew/stalls. xsim seeds itself the same way
+    // every run unless you pass -sv_seed, so a soak failure reproduces as is;
+    // xsim tb_aes_axi_lite_sim -R -sv_seed N to shake a different pattern out.
+    // ($urandom(seed) itself isn't supported in 2019.2, only $urandom_range.)
+    localparam int N_SOAK   = 25;
 
     // register offsets, same as docs/register_map.md
     localparam logic [5:0] R_CTRL   = 6'h00;
@@ -88,61 +101,174 @@ module tb_aes_axi_lite;
 
     always #5 clk = ~clk;  // 100 MHz
 
+    // ---- protocol checkers ----
+    //
+    // The BFM and the wrapper were both written by me against the same
+    // mental model, so they agree with each other whether or not that model
+    // is right. These watch the wires instead and check the handshake rules
+    // straight out of the spec (IHI 0022, A3.2 channel handshake): once a
+    // VALID goes up it stays up until its READY, and nothing underneath it
+    // moves in the meantime. They also police the BFM - if my master ever
+    // drops a VALID early or slides an address out from under one, that's
+    // caught here rather than silently becoming the thing the wrapper was
+    // built to tolerate.
+
+    // slave outputs
+    a_bvalid_held: assert property (@(posedge clk) disable iff (!aresetn)
+        (bvalid && !bready) |=> bvalid)
+        else begin $display("FAIL: BVALID dropped before BREADY"); errors++; end
+
+    a_bresp_stable: assert property (@(posedge clk) disable iff (!aresetn)
+        (bvalid && !bready) |=> $stable(bresp))
+        else begin $display("FAIL: BRESP moved while BVALID was waiting"); errors++; end
+
+    a_rvalid_held: assert property (@(posedge clk) disable iff (!aresetn)
+        (rvalid && !rready) |=> rvalid)
+        else begin $display("FAIL: RVALID dropped before RREADY"); errors++; end
+
+    a_rdata_stable: assert property (@(posedge clk) disable iff (!aresetn)
+        (rvalid && !rready) |=> $stable(rdata) && $stable(rresp))
+        else begin $display("FAIL: RDATA/RRESP moved while RVALID was waiting"); errors++; end
+
+    // master outputs - the BFM policing itself
+    a_awvalid_held: assert property (@(posedge clk) disable iff (!aresetn)
+        (awvalid && !awready) |=> awvalid && $stable(awaddr) && $stable(awprot))
+        else begin $display("FAIL: BFM moved AW before AWREADY"); errors++; end
+
+    a_wvalid_held: assert property (@(posedge clk) disable iff (!aresetn)
+        (wvalid && !wready) |=> wvalid && $stable(wdata) && $stable(wstrb))
+        else begin $display("FAIL: BFM moved W before WREADY"); errors++; end
+
+    a_arvalid_held: assert property (@(posedge clk) disable iff (!aresetn)
+        (arvalid && !arready) |=> arvalid && $stable(araddr) && $stable(arprot))
+        else begin $display("FAIL: BFM moved AR before ARREADY"); errors++; end
+
+    // nothing may respond during reset
+    a_quiet_in_reset: assert property (@(posedge clk) (!aresetn) |-> (!bvalid && !rvalid))
+        else begin $display("FAIL: a response channel was live during reset"); errors++; end
+
+    // and a response can't turn up without a request behind it
+    int wr_out = 0, rd_out = 0;
+    always_ff @(posedge clk) begin
+        if (!aresetn) begin
+            wr_out <= 0;
+            rd_out <= 0;
+        end else begin
+            wr_out <= wr_out + ((awvalid && awready) ? 1 : 0) - ((bvalid && bready) ? 1 : 0);
+            rd_out <= rd_out + ((arvalid && arready) ? 1 : 0) - ((rvalid && rready) ? 1 : 0);
+        end
+    end
+
+    a_no_orphan_b: assert property (@(posedge clk) disable iff (!aresetn)
+        bvalid |-> (wr_out > 0))
+        else begin $display("FAIL: BVALID with no write outstanding"); errors++; end
+
+    a_no_orphan_r: assert property (@(posedge clk) disable iff (!aresetn)
+        rvalid |-> (rd_out > 0))
+        else begin $display("FAIL: RVALID with no read outstanding"); errors++; end
+
     // ---- BFM ----
+
+    // Each channel gets its own thread so they can be driven out of step -
+    // address before data, data before address, a master that dawdles before
+    // accepting its response. The delays are module level and default to 0,
+    // so every directed test below drives the bus exactly the way it did
+    // before; set rand_delays and the BFM skews every transaction instead.
+    int dly_aw = 0, dly_w = 0, dly_b = 0, dly_ar = 0, dly_r = 0;
+    bit rand_delays = 0;
+
+    task automatic pick_delays;
+        if (rand_delays) begin
+            dly_aw = $urandom_range(0, 4);
+            dly_w  = $urandom_range(0, 4);
+            dly_b  = $urandom_range(0, 4);
+            dly_ar = $urandom_range(0, 4);
+            dly_r  = $urandom_range(0, 4);
+        end
+    endtask
 
     task automatic axi_write(input logic [5:0] addr,
                              input logic [31:0] data,
                              input logic [3:0]  strb = 4'hf);
-        @(posedge clk);
-        awaddr  <= addr;
-        awprot  <= 3'b010;   // nonsecure data access - value is ignored, but
-                             // drive something non-zero so a wrapper that
-                             // accidentally decoded it would misbehave
-        awvalid <= 1'b1;
-        wdata   <= data;
-        wstrb   <= strb;
-        wvalid  <= 1'b1;
-        bready  <= 1'b1;
-        forever begin
-            @(posedge clk);
-            if (awready && wready) break;   // no delay here, see the note up top
-        end
-        awvalid <= 1'b0;
-        wvalid  <= 1'b0;
-        forever begin
-            @(posedge clk);
-            if (bvalid) break;
-        end
-        if (bresp !== 2'b00) begin
-            $display("FAIL: write to 0x%02x got bresp %b", addr, bresp);
-            errors++;
-        end
-        bready <= 1'b0;
+        pick_delays();
+        fork
+            begin : aw_ch
+                @(posedge clk);
+                repeat (dly_aw) @(posedge clk);
+                awaddr  <= addr;
+                awprot  <= 3'b010;   // nonsecure data access - value is
+                                     // ignored, but drive something non-zero
+                                     // so a wrapper that accidentally decoded
+                                     // it would misbehave
+                awvalid <= 1'b1;
+                forever begin
+                    @(posedge clk);
+                    if (awready) break;   // no delay here, see the note up top
+                end
+                awvalid <= 1'b0;
+            end
+            begin : w_ch
+                @(posedge clk);
+                repeat (dly_w) @(posedge clk);
+                wdata  <= data;
+                wstrb  <= strb;
+                wvalid <= 1'b1;
+                forever begin
+                    @(posedge clk);
+                    if (wready) break;
+                end
+                wvalid <= 1'b0;
+            end
+            begin : b_ch
+                @(posedge clk);
+                repeat (dly_b) @(posedge clk);
+                bready <= 1'b1;
+                forever begin
+                    @(posedge clk);
+                    if (bvalid && bready) break;
+                end
+                if (bresp !== 2'b00) begin
+                    $display("FAIL: write to 0x%02x got bresp %b", addr, bresp);
+                    errors++;
+                end
+                bready <= 1'b0;
+            end
+        join
     endtask
 
     task automatic axi_read(input logic [5:0] addr, output logic [31:0] data);
-        @(posedge clk);
-        araddr  <= addr;
-        arprot  <= 3'b010;
-        arvalid <= 1'b1;
-        rready  <= 1'b1;
-        forever begin
-            @(posedge clk);
-            if (arready) break;
-        end
-        arvalid <= 1'b0;
-        forever begin
-            @(posedge clk);
-            if (rvalid) begin
-                data = rdata;
-                break;
+        pick_delays();
+        fork
+            begin : ar_ch
+                @(posedge clk);
+                repeat (dly_ar) @(posedge clk);
+                araddr  <= addr;
+                arprot  <= 3'b010;
+                arvalid <= 1'b1;
+                forever begin
+                    @(posedge clk);
+                    if (arready) break;
+                end
+                arvalid <= 1'b0;
             end
-        end
-        if (rresp !== 2'b00) begin
-            $display("FAIL: read from 0x%02x got rresp %b", addr, rresp);
-            errors++;
-        end
-        rready <= 1'b0;
+            begin : r_ch
+                @(posedge clk);
+                repeat (dly_r) @(posedge clk);
+                rready <= 1'b1;
+                forever begin
+                    @(posedge clk);
+                    if (rvalid && rready) begin
+                        data = rdata;
+                        break;
+                    end
+                end
+                if (rresp !== 2'b00) begin
+                    $display("FAIL: read from 0x%02x got rresp %b", addr, rresp);
+                    errors++;
+                end
+                rready <= 1'b0;
+            end
+        join
     endtask
 
     task automatic check_reg(input logic [5:0] addr,
@@ -535,6 +661,60 @@ module tb_aes_axi_lite;
         encrypt(reuse_pt[0], reuse_ct[0]);
         if (errors == e0)
             $display("PASS: reset mid encryption recovers");
+
+        // 17. channel skew and response stalls, directed. the BFM used to
+        //     put AWVALID and WVALID up in the same cycle every single time
+        //     and pre-assert BREADY/RREADY, so none of this was reachable:
+        //     the wrapper waits for both valids before it takes anything, and
+        //     it has to hold a response until the master is ready for it.
+        //     the protocol checkers above are what actually watch the hold
+        //     behaviour - these just create the situations.
+        e0 = errors;
+        load_key(128'h2b7e151628aed2a6abf7158809cf4f3c);
+
+        dly_aw = 5; dly_w = 0; dly_b = 0;            // data well before address
+        axi_write(R_DIN0, 32'h3243f6a8);
+        dly_aw = 0; dly_w = 5;                       // address well before data
+        axi_write(R_DIN0 + 6'h4, 32'h885a308d);
+        dly_w = 0; dly_b = 6;                        // slow to take the response
+        axi_write(R_DIN0 + 6'h8, 32'h313198a2);
+        dly_b = 0;
+        axi_write(R_DIN0 + 6'hc, 32'he0370734);
+
+        dly_ar = 4; dly_r = 0;                       // late address on a read
+        check_reg(R_DIN0, 32'h3243f6a8, "DIN0 after skewed writes");
+        dly_ar = 0; dly_r = 6;                       // slow to take read data
+        check_reg(R_DIN0 + 6'h4, 32'h885a308d, "DIN1 after skewed writes");
+        dly_r = 0;
+        check_reg(R_DIN0 + 6'h8, 32'h313198a2, "DIN2 after skewed writes");
+        check_reg(R_DIN0 + 6'hc, 32'he0370734, "DIN3 after skewed writes");
+
+        // and the block those skewed writes assembled still encrypts right
+        axi_write(R_CTRL, 32'h2);
+        poll_status(ST_DONE);
+        read_dout(rb);
+        if (rb !== 128'h3925841d02dc09fbdc118597196a0b32) begin
+            $display("FAIL: KAT through skewed transfers gave %032x", rb);
+            errors++;
+        end
+        if (errors == e0)
+            $display("PASS: channel skew and response stalls");
+
+        // 18. soak with every transaction randomly skewed and stalled,
+        //     status polls and DOUT reads included
+        e0 = errors;
+        rand_delays = 1;
+        fd    = open_vec("random_1000.txt");
+        nline = 0;
+        while (nline < N_SOAK && $fscanf(fd, "%h %h %h", vk, vpt, vct) == 3) begin
+            nline++;
+            load_key(vk);
+            encrypt(vpt, vct);
+        end
+        $fclose(fd);
+        rand_delays = 0;
+        if (errors == e0)
+            $display("PASS: %0d vectors with randomized skew/stalls", nline);
 
         if (errors == 0)
             $display("PASS: aes_axi_lite, %0d blocks through the bus", n);
