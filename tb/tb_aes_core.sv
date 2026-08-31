@@ -85,12 +85,35 @@ module tb_aes_core;
     logic [127:0] reuse_pt [0:2], reuse_ct [0:2];
     int fd, cycles, nline;
 
+    // watchdog - a hang used to just spin forever, which in a scripted run
+    // looks the same as still working
+    initial begin
+        #2ms;
+        $display("FAIL: watchdog timeout, something hung");
+        $finish;   // not $fatal - xsim -R stops at a prompt on $fatal
+    end
+
     initial begin
         key_load = 1'b0;
         start    = 1'b0;
         rst      = 1'b1;
         repeat (2) @(posedge clk);
         rst <= 1'b0;
+
+        // 0. start with no key loaded has to be ignored. this can't be seen
+        //    through the axi tb - the wrapper gates START on KEY_READY the
+        //    same way the core does, so the core's own gate only shows up
+        //    here (mutation testing found it had no coverage at all)
+        plaintext <= 128'h0;
+        @(posedge clk);
+        start <= 1'b1;
+        @(posedge clk);
+        start <= 1'b0;
+        repeat (4) @(posedge clk);
+        if (busy !== 1'b0 || done !== 1'b0) begin
+            $display("FAIL: start with no key did something (busy=%b done=%b)", busy, done);
+            errors++;
+        end
 
         // 1. FIPS-197 known answer test
         fd = open_vec("fips197_kat.txt");

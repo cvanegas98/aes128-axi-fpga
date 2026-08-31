@@ -119,3 +119,40 @@ Phase 4 - timing + writeup
   also: create_project.tcl only globbed rtl/*.sv so it missed rtl/axi,
   added a second glob. re-source it to pick the wrapper up in the gui.
   next: phase 3, uart to axi bridge (reuse the uart from my old project).
+- 8/31: testbench repair session, after a fresh eyes review mutation tested
+  the rtl against my tbs and 4 of 5 breaks survived. all of them control
+  path, all the same disease as the tb_key_expand bug from 8/26: sticky
+  done/key_ready levels checked after the fact instead of watching the
+  transition. fixes are all tb/vector side, rtl untouched:
+  - watchdogs in the three clocked tbs (2ms then FAIL + $finish). a hang now
+    prints FAIL instead of spinning forever. xsim gotcha: $fatal under -R
+    stops at a prompt like a breakpoint, so the watchdog has to $finish.
+  - tb_key_expand: @(posedge done) instead of wait(done), and run 2 uses the
+    appendix c.1 key (new vectors/roundkeys2.txt from gen_vectors.py) so
+    stale round keys can't pass by luck. another xsim gotcha: a string
+    concat fed straight into $readmemh from a static task garbles the path
+    ("File @@FP"), has to go through a string variable in an automatic task.
+  - tb_aes_core: new test 0, start with no key loaded has to do nothing.
+    the axi tb can't cover the core's own key_ready gate because the wrapper
+    gates start identically in front of it.
+  - tb_aes_axi_lite: the both-ctrl-bits test now reads STATUS right after
+    the CTRL=3 write and requires busy=1/key_ready=0 - the transient is the
+    only thing separating "key_load won" from "nothing fired at all". the
+    read only write test reads DOUT and KEY0-3 back afterwards (bresp is
+    hardwired OKAY so checking it proves nothing). two new tests: START and
+    KEY_LOAD written while busy get dropped, exactly one block runs, dout
+    and the loaded key survive.
+  reran the review's mutation set: everything killed except removing the
+  wrapper's !busy gate, which turns out to be a functionally equivalent
+  mutant - the core fsm only takes pulses in idle, which is exactly !busy,
+  so the gate is redundant defense in depth and no bus level test can tell
+  the two layers apart. keeping the gate, writing it down here instead of
+  pretending it's covered.
+  parking the first synth numbers from the review so they don't get lost
+  (2019.2, xc7a35t-1, batch synth_design, no real constraints yet):
+  2257 lut / 1849 ff / 0 bram / 0 dsp, wns +3.717 at a 10 ns clock, so
+  ~159 MHz post synth. critical path is in key_expand, round_keys mux ->
+  sbox -> xor chain, 73% routing.
+  next: the small rtl fixes out of the review (dout holding register so the
+  bus can't read mid-round state, awprot/arprot ports), then the uart
+  bridge.

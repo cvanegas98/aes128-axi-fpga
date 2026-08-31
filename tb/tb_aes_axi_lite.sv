@@ -6,8 +6,9 @@
 //
 // The crypto is already covered by tb_aes_core (all 1000 vectors), so this tb
 // is mostly about the wrapper: register readback, byte enables, the ctrl
-// pulse bits, the ignore rules, and the irq. It runs a smaller batch of
-// vectors through the bus just to prove the plumbing end to end.
+// pulse bits, the ignore rules (including writes landing while busy), and
+// the irq. It runs a smaller batch of vectors through the bus just to prove
+// the plumbing end to end.
 //
 // One BFM detail worth remembering: awready/wready/arready are combinational
 // off *valid, so the handshake has to be sampled with the values that were
@@ -208,10 +209,18 @@ module tb_aes_axi_lite;
         return fd;
     endfunction
 
-    logic [127:0] vk, vpt, vct;
+    logic [127:0] vk, vpt, vct, rb;
     logic [127:0] reuse_pt [0:2], reuse_ct [0:2];
     logic [31:0]  d;
-    int fd, nline;
+    int fd, nline, e0;
+
+    // watchdog - a hang (dead handshake, done that never comes) used to just
+    // spin forever, which in a scripted run looks the same as still working
+    initial begin
+        #2ms;
+        $display("FAIL: watchdog timeout, something hung");
+        $finish;   // not $fatal - xsim -R stops at a prompt on $fatal
+    end
 
     initial begin
         awvalid = 0; wvalid = 0; bready = 0; arvalid = 0; rready = 0;
@@ -243,27 +252,33 @@ module tb_aes_axi_lite;
         check_reg(R_STATUS, 32'h0, "STATUS after START with no key");
 
         // 5. writing both KEY_LOAD and START at once - key_load has to win.
-        //    this has to be done with a key already loaded, otherwise START
-        //    is gated off by KEY_READY anyway and the test passes no matter
-        //    which bit the wrapper prioritizes (found that the hard way by
-        //    swapping the priority in a scratch copy and watching it still
-        //    pass). with KEY_READY up, the wrong priority runs an encryption
-        //    and DONE goes high, which is what we're checking for.
+        //    take two on this test. take one waited and looked at the settled
+        //    levels, but KEY_READY was still high from the load above, so
+        //    "key_load won" and "the write did nothing at all" read identical
+        //    afterwards - a mutation that dropped both bits passed. the tell
+        //    is the transient: if key_load really fired, then right after the
+        //    write the core is busy re-expanding with KEY_READY down. a read
+        //    lands ~3 cycles after the write and the expansion takes 11, so
+        //    the window is comfortably visible.
         write_key(128'h2b7e151628aed2a6abf7158809cf4f3c);
         axi_write(R_CTRL, 32'h1);
         poll_status(ST_KEY_READY);
+        e0 = errors;
         axi_write(R_CTRL, 32'h3);
-        repeat (40) @(posedge clk);      // longer than an expand or an encrypt
+        axi_read(R_STATUS, d);           // lands inside the expansion window
+        if (d[ST_BUSY] !== 1'b1 || d[ST_KEY_READY] !== 1'b0) begin
+            $display("FAIL: CTRL=3 didn't kick off a re-expansion (busy=%b key_ready=%b)",
+                     d[ST_BUSY], d[ST_KEY_READY]);
+            errors++;
+        end
+        poll_status(ST_KEY_READY);       // let the expansion finish
         axi_read(R_STATUS, d);
         if (d[ST_DONE] !== 1'b0) begin
             $display("FAIL: START ran when KEY_LOAD was set too, DONE came up");
             errors++;
-        end else if (d[ST_KEY_READY] !== 1'b1) begin
-            $display("FAIL: KEY_LOAD didn't re-expand, KEY_READY never came back");
-            errors++;
-        end else begin
-            $display("PASS: KEY_LOAD wins when both ctrl bits are set");
         end
+        if (errors == e0)
+            $display("PASS: KEY_LOAD wins when both ctrl bits are set");
 
         // 6. the FIPS-197 known answer vector, all the way through the bus
         fd = open_vec("fips197_kat.txt");
@@ -277,7 +292,11 @@ module tb_aes_axi_lite;
         if (errors == 0)
             $display("PASS: FIPS-197 KAT over AXI");
 
-        // 7. read only and unmapped addresses
+        // 7. read only and unmapped addresses. bresp is hardwired OKAY, so
+        //    just writing and checking the response proves nothing (a mutation
+        //    that routed DOUT writes into the key regs passed take one of this
+        //    test) - the write has to be shown to land *nowhere*, so read the
+        //    likely victims back afterwards
         axi_write(R_STATUS, 32'hffffffff);       // should be swallowed
         axi_read(R_STATUS, d);
         if (d[31:3] !== 29'h0) begin
@@ -285,6 +304,15 @@ module tb_aes_axi_lite;
             errors++;
         end
         axi_write(R_DOUT0, 32'hffffffff);        // read only, also swallowed
+        read_dout(rb);
+        if (rb !== vct) begin
+            $display("FAIL: DOUT changed after a write to it: %032x", rb);
+            errors++;
+        end
+        check_reg(R_KEY0,        32'h2b7e1516, "KEY0 after RO writes");
+        check_reg(R_KEY0 + 6'h4, 32'h28aed2a6, "KEY1 after RO writes");
+        check_reg(R_KEY0 + 6'h8, 32'habf71588, "KEY2 after RO writes");
+        check_reg(R_KEY0 + 6'hc, 32'h09cf4f3c, "KEY3 after RO writes");
         check_reg(6'h38, 32'h0, "unmapped 0x38");
         check_reg(6'h3c, 32'h0, "unmapped 0x3c");
 
@@ -334,6 +362,58 @@ module tb_aes_axi_lite;
                 errors++;
             end
         end
+
+        // 11. START while busy is dropped. the register map promises this and
+        //     nothing tested it - no CTRL write ever landed while the core
+        //     was running. kick off a block, hit START again mid encryption,
+        //     and make sure exactly one block ran. (the wrapper's !busy gate
+        //     and the core fsm enforce this identically, so this checks the
+        //     contract, not which of the two layers did it.)
+        e0 = errors;
+        write_din(reuse_pt[0]);
+        axi_write(R_CTRL, 32'h2);        // start the block
+        axi_write(R_CTRL, 32'h2);        // lands a few cycles in - dropped
+        axi_read(R_STATUS, d);
+        if (d[ST_BUSY] !== 1'b1) begin
+            $display("FAIL: expected to land in the busy window (STATUS=%08x)", d);
+            errors++;
+        end
+        poll_status(ST_DONE);
+        read_dout(rb);
+        if (rb !== reuse_ct[0]) begin
+            $display("FAIL: START while busy corrupted the block: %032x", rb);
+            errors++;
+        end
+        // wait out a whole extra block time - if the second START had been
+        // latched somewhere it would rerun and DONE would blink
+        repeat (16) @(posedge clk);
+        axi_read(R_STATUS, d);
+        if (d[ST_DONE] !== 1'b1 || d[ST_BUSY] !== 1'b0) begin
+            $display("FAIL: something ran after the dropped START (STATUS=%08x)", d);
+            errors++;
+        end
+        if (errors == e0)
+            $display("PASS: START while busy is dropped");
+
+        // 12. KEY_LOAD while busy is dropped too - the key has to survive
+        e0 = errors;
+        write_din(reuse_pt[1]);
+        axi_write(R_CTRL, 32'h2);
+        axi_write(R_CTRL, 32'h1);        // key_load mid encryption - dropped
+        poll_status(ST_DONE);
+        read_dout(rb);
+        if (rb !== reuse_ct[1]) begin
+            $display("FAIL: KEY_LOAD while busy corrupted the block: %032x", rb);
+            errors++;
+        end
+        axi_read(R_STATUS, d);
+        if (d[ST_KEY_READY] !== 1'b1) begin
+            $display("FAIL: KEY_LOAD while busy killed the loaded key");
+            errors++;
+        end
+        encrypt(reuse_pt[2], reuse_ct[2]);   // and the key still works
+        if (errors == e0)
+            $display("PASS: KEY_LOAD while busy is dropped");
 
         if (errors == 0)
             $display("PASS: aes_axi_lite, %0d blocks through the bus", n);

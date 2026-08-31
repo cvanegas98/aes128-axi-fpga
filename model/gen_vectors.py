@@ -63,6 +63,13 @@ def main():
     (VECTORS_DIR / "fips197_roundkeys.txt").write_text("".join(rk.hex() + "\n" for rk in rks))
     print("wrote fips197_roundkeys.txt")
 
+    # second round key set (the appendix c.1 key) for the key_expand tb's
+    # restart test. both runs using the same key meant a restart that quietly
+    # kept the old keys still passed, so run 2 needs different expected values.
+    rks2 = expand_key(bytes.fromhex("000102030405060708090a0b0c0d0e0f"))
+    (VECTORS_DIR / "roundkeys2.txt").write_text("".join(rk.hex() + "\n" for rk in rks2))
+    print("wrote roundkeys2.txt")
+
     # random vectors, plus a few edge cases first (all 0s, all FFs, counting)
     rng = random.Random(args.seed)
     edge = [bytes(16), bytes([0xFF] * 16), bytes(range(16))]
