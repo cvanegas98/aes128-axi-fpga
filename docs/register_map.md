@@ -5,8 +5,16 @@ so I'm not making it up as I go.
 
 32-bit data bus, byte addressed, 64 byte aperture (so addr[5:2] picks the
 register). Everything unused reads back 0. Writes to read only registers are
-accepted and ignored - AXI needs an OKAY response either way, you don't get
-to error out just because software wrote somewhere silly.
+accepted and ignored. A slave is allowed to answer SLVERR there - I chose
+OKAY-and-drop instead, since software is expected to poll STATUS and one
+response path is less to get wrong.
+
+Only addr[5:2] is decoded; anything above bit 5 is ignored because the
+interconnect has already picked the window. If the wrapper is instantiated
+with ADDR_WIDTH > 6 the map aliases every 64 bytes (0x40 is CTRL again).
+
+AWPROT/ARPROT are present because AXI4-Lite requires them, and are ignored -
+there's no privileged or secure distinction in this core.
 
 | offset | name    | access | what it does           |
 |--------|---------|--------|------------------------|
@@ -60,6 +68,27 @@ These are just aes_core's key_ready / busy / done brought out. DONE stays high
 until the next START, same as the core, so software can poll it and then read
 DOUT whenever it gets around to it. KEY_READY drops on KEY_LOAD and comes back
 when the expansion finishes.
+
+## DOUT (0x28-0x34)
+
+DOUT is a holding register, not a live view of the core. aes_core drives its
+ciphertext output straight off the state register, so the wrapper captures it
+on the DONE edge instead of wiring it through. That means:
+
+- before the first block finishes, DOUT reads 0 (not the X the raw state
+  register would give in sim)
+- during an encryption DOUT still holds the *previous* ciphertext, so a read
+  that lands mid block gets a real earlier result rather than a half
+  encrypted state
+- DOUT is valid as soon as STATUS.DONE reads back set. The capture happens
+  one cycle after the core's internal done, and a STATUS read can't get back
+  to software in under about three cycles, so software can't outrun it.
+
+Torn reads are still possible and software has to avoid them: DOUT0-3 are
+four separate transactions, and if a block completes partway through that
+sequence the four words come from two different blocks. My own testbench hit
+this by accident - four back to back reads take ~14 cycles and a block only
+takes 11. Read DOUT only after DONE and before starting the next block.
 
 ## Interrupt
 

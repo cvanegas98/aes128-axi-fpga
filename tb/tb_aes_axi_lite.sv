@@ -45,6 +45,7 @@ module tb_aes_axi_lite;
     logic        aresetn;
 
     logic [5:0]  awaddr;
+    logic [2:0]  awprot, arprot;
     logic        awvalid, awready;
     logic [31:0] wdata;
     logic [3:0]  wstrb;
@@ -64,6 +65,7 @@ module tb_aes_axi_lite;
         .s_axi_aclk    (clk),
         .s_axi_aresetn (aresetn),
         .s_axi_awaddr  (awaddr),
+        .s_axi_awprot  (awprot),
         .s_axi_awvalid (awvalid),
         .s_axi_awready (awready),
         .s_axi_wdata   (wdata),
@@ -74,6 +76,7 @@ module tb_aes_axi_lite;
         .s_axi_bvalid  (bvalid),
         .s_axi_bready  (bready),
         .s_axi_araddr  (araddr),
+        .s_axi_arprot  (arprot),
         .s_axi_arvalid (arvalid),
         .s_axi_arready (arready),
         .s_axi_rdata   (rdata),
@@ -92,6 +95,9 @@ module tb_aes_axi_lite;
                              input logic [3:0]  strb = 4'hf);
         @(posedge clk);
         awaddr  <= addr;
+        awprot  <= 3'b010;   // nonsecure data access - value is ignored, but
+                             // drive something non-zero so a wrapper that
+                             // accidentally decoded it would misbehave
         awvalid <= 1'b1;
         wdata   <= data;
         wstrb   <= strb;
@@ -117,6 +123,7 @@ module tb_aes_axi_lite;
     task automatic axi_read(input logic [5:0] addr, output logic [31:0] data);
         @(posedge clk);
         araddr  <= addr;
+        arprot  <= 3'b010;
         arvalid <= 1'b1;
         rready  <= 1'b1;
         forever begin
@@ -225,16 +232,25 @@ module tb_aes_axi_lite;
     initial begin
         awvalid = 0; wvalid = 0; bready = 0; arvalid = 0; rready = 0;
         awaddr  = 0; wdata  = 0; wstrb  = 4'hf; araddr = 0;
+        awprot  = 0; arprot = 0;
         aresetn = 0;
         repeat (4) @(posedge clk);
         aresetn <= 1'b1;
         repeat (2) @(posedge clk);
 
-        // 1. everything should come out of reset zeroed
+        // 1. everything should come out of reset zeroed. DOUT is in this list
+        //    now - it used to be wired straight to the core's state register,
+        //    so before the first block it read X and this check would have
+        //    failed (which is why it wasn't here)
         check_reg(R_CTRL,   32'h0, "CTRL at reset");
         check_reg(R_STATUS, 32'h0, "STATUS at reset");
         check_reg(R_KEY0,   32'h0, "KEY0 at reset");
         check_reg(R_DIN0,   32'h0, "DIN0 at reset");
+        read_dout(rb);
+        if (rb !== 128'h0) begin
+            $display("FAIL: DOUT at reset = %032x, expected 0", rb);
+            errors++;
+        end
 
         // 2. plain register readback
         axi_write(R_KEY0 + 6'h4, 32'hdeadbeef);
@@ -414,6 +430,111 @@ module tb_aes_axi_lite;
         encrypt(reuse_pt[2], reuse_ct[2]);   // and the key still works
         if (errors == e0)
             $display("PASS: KEY_LOAD while busy is dropped");
+
+        // 13. DOUT holds the last finished block while a new one is running.
+        //     ciphertext used to come straight off the core's state register,
+        //     so a read landing mid encryption handed the bus a partially
+        //     encrypted block. now it's captured on the done edge.
+        e0 = errors;
+        write_din(reuse_pt[0]);
+        axi_write(R_CTRL, 32'h2);
+        axi_read(R_STATUS, d);           // land inside the encryption
+        if (d[ST_BUSY] !== 1'b1) begin
+            $display("FAIL: expected to be mid encryption (STATUS=%08x)", d);
+            errors++;
+        end
+        //  one word, not all four: a bus read is ~3-4 cycles and the block
+        //  only takes 11, so read_dout() here would still be reading when the
+        //  encryption finished and would splice the old and new ciphertexts
+        //  together. that's the torn read hazard the register map warns about
+        //  - worth knowing that it is easy to hit by accident. one word lands
+        //  ~5 cycles before the capture, which is the margin this check wants.
+        axi_read(R_DOUT0, d);
+        if (d !== reuse_ct[2][127:96]) begin
+            $display("FAIL: DOUT0 moved mid encryption: %08x (want the previous block %08x)",
+                     d, reuse_ct[2][127:96]);
+            errors++;
+        end
+        poll_status(ST_DONE);
+        read_dout(rb);
+        if (rb !== reuse_ct[0]) begin
+            $display("FAIL: DOUT didn't update after done: %032x", rb);
+            errors++;
+        end
+        if (errors == e0)
+            $display("PASS: DOUT holds the last block, no mid round state on the bus");
+
+        // 14. DOUT is valid as soon as DONE reads back set - the capture is a
+        //     cycle behind the core's done, so check software can't outrun it
+        e0 = errors;
+        write_din(reuse_pt[1]);
+        axi_write(R_CTRL, 32'h2);
+        poll_status(ST_DONE);            // returns the instant DONE reads 1
+        axi_read(R_DOUT0, d);            // very next transaction
+        if (d !== reuse_ct[1][127:96]) begin
+            $display("FAIL: DOUT0 stale right after DONE: %08x, expected %08x",
+                     d, reuse_ct[1][127:96]);
+            errors++;
+        end
+        if (errors == e0)
+            $display("PASS: DOUT valid on the first read after DONE");
+
+        // 15. reset while a response is pending. bvalid has to drop straight
+        //     away, not linger until the next clock edge, and the wrapper has
+        //     to come back usable afterwards
+        e0 = errors;
+        @(posedge clk);
+        awaddr <= R_KEY0; wdata <= 32'hcafef00d; wstrb <= 4'hf;
+        awvalid <= 1'b1; wvalid <= 1'b1; bready <= 1'b0;   // hold the response
+        forever begin
+            @(posedge clk);
+            if (awready && wready) break;
+        end
+        awvalid <= 1'b0; wvalid <= 1'b0;
+        forever begin
+            @(posedge clk);
+            if (bvalid) break;
+        end
+        aresetn <= 1'b0;                 // reset with BVALID still up
+        #1;
+        if (bvalid !== 1'b0) begin
+            $display("FAIL: BVALID stayed high while ARESETN was low");
+            errors++;
+        end
+        repeat (3) @(posedge clk);
+        aresetn <= 1'b1;
+        repeat (2) @(posedge clk);
+        bready <= 1'b0;
+        check_reg(R_KEY0,   32'h0, "KEY0 after reset");
+        check_reg(R_STATUS, 32'h0, "STATUS after reset");
+        if (errors == e0)
+            $display("PASS: reset drops a pending response and clears the regs");
+
+        // 16. reset in the middle of an encryption. the core has to come back
+        //     idle rather than finishing the block or wedging
+        e0 = errors;
+        load_key(128'h0);
+        write_din(reuse_pt[0]);
+        axi_write(R_CTRL, 32'h2);
+        axi_read(R_STATUS, d);
+        if (d[ST_BUSY] !== 1'b1) begin
+            $display("FAIL: expected busy before the mid encryption reset");
+            errors++;
+        end
+        aresetn <= 1'b0;
+        repeat (3) @(posedge clk);
+        aresetn <= 1'b1;
+        repeat (2) @(posedge clk);
+        axi_read(R_STATUS, d);
+        if (d !== 32'h0) begin
+            $display("FAIL: STATUS after mid encryption reset = %08x, expected 0", d);
+            errors++;
+        end
+        // and it still works afterwards
+        load_key(128'h0);
+        encrypt(reuse_pt[0], reuse_ct[0]);
+        if (errors == e0)
+            $display("PASS: reset mid encryption recovers");
 
         if (errors == 0)
             $display("PASS: aes_axi_lite, %0d blocks through the bus", n);

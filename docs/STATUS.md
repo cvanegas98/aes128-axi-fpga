@@ -156,3 +156,43 @@ Phase 4 - timing + writeup
   next: the small rtl fixes out of the review (dout holding register so the
   bus can't read mid-round state, awprot/arprot ports), then the uart
   bridge.
+- 8/31 (later): the rtl fixes. this time the tbs could actually catch a
+  regression, which is why they went first.
+  - DOUT is a holding register now, captured on the done edge, instead of
+    being wired straight to aes_core's state register. that one change kills
+    three problems: reading DOUT before the first block gave X, reading it
+    mid encryption handed the bus a half encrypted state, and the reset
+    readback test couldn't check DOUT at all because of the X. mutation
+    check: putting the raw wire back fails with "DOUT at reset = xxx" and
+    "DOUT0 moved mid encryption: abd2cdfe" - that value is real round state,
+    which is exactly what shouldn't be visible.
+  - awprot/arprot added. they're required by the spec and ignored here, but
+    without them the ip packager and any block design integration complains.
+    tb drives 3'b010 rather than zeros so a wrapper that accidentally
+    decoded them would break.
+  - handshake outputs gated with aresetn. the state regs clear synchronously,
+    so a response pending when reset hit kept BVALID high until the next
+    clock edge and the spec wants VALID low during reset.
+  - ADDR_WIDTH was a lie - parameterized but addr[5:2] hardcoded. added an
+    elaboration check that it's >= 6 and wrote down that the map aliases
+    every 64 bytes above that, since only addr[5:2] is decoded.
+  - reset mid operation tests, core and wrapper: reset during an encryption
+    and during a key expansion, check everything comes back clear and the
+    core still works after. also reset with a response pending.
+  new mutants, all killed: raw DOUT wire, capture disabled, BVALID not
+  gated, reset not clearing key_ready, reset not returning the fsm to idle.
+  reran the session 1 mutants too, still all killed.
+  the good one this session: my own mid encryption DOUT test failed the
+  first time and it was the test that was wrong, not the rtl. read_dout()
+  is four transactions, ~14 cycles, and a block only takes 11 - so the
+  encryption finished partway through and I spliced the tail of the new
+  ciphertext onto the head of the old one. that's the torn read hazard,
+  hit by accident in my own testbench. the test reads one word now, and
+  the register map documents the constraint properly.
+  resynthesized: 2259 lut / 1978 ff (+129, the 128 bit dout register and
+  its done delay), wns still +3.717 - the critical path is in key_expand
+  and none of this touched it. no critical warnings, the only warnings are
+  the prot bits and addr[1:0] being deliberately unused.
+  next: phase 3, uart to axi bridge. the bfm stall/skew work (AW before W,
+  delayed BREADY/RREADY) and the vivado vip cross check are still open and
+  should happen before I call the axi wrapper done.

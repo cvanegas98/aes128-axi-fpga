@@ -175,6 +175,55 @@ module tb_aes_core;
             end
         end
 
+        // 4. reset partway through an encryption. the fsm has to land back in
+        //    idle with the status lines clear, not finish the block or wedge
+        //    somewhere. nothing covered this at all before.
+        plaintext <= reuse_pt[0];
+        @(posedge clk);
+        start <= 1'b1;
+        @(posedge clk);
+        start <= 1'b0;
+        repeat (4) @(posedge clk);     // ~4 rounds in
+        if (!busy) begin
+            $display("FAIL: expected to still be encrypting before the reset");
+            errors++;
+        end
+        rst <= 1'b1;
+        repeat (2) @(posedge clk);
+        rst <= 1'b0;
+        @(posedge clk);
+        if (busy !== 1'b0 || done !== 1'b0 || key_ready !== 1'b0) begin
+            $display("FAIL: after reset mid encryption busy=%b done=%b key_ready=%b",
+                     busy, done, key_ready);
+            errors++;
+        end
+        // and the core is still usable
+        load_key(128'h0);
+        encrypt(reuse_pt[0], reuse_ct[0]);
+
+        // 5. same thing during key expansion
+        key <= 128'h0;
+        @(posedge clk);
+        key_load <= 1'b1;
+        @(posedge clk);
+        key_load <= 1'b0;
+        repeat (4) @(posedge clk);     // partway through the expansion
+        if (!busy) begin
+            $display("FAIL: expected to still be expanding before the reset");
+            errors++;
+        end
+        rst <= 1'b1;
+        repeat (2) @(posedge clk);
+        rst <= 1'b0;
+        @(posedge clk);
+        if (busy !== 1'b0 || key_ready !== 1'b0) begin
+            $display("FAIL: after reset mid expansion busy=%b key_ready=%b", busy, key_ready);
+            errors++;
+        end
+        load_key(128'h0);
+        encrypt(reuse_pt[1], reuse_ct[1]);
+        $display("PASS: reset mid operation recovers (encrypt and expand)");
+
         if (errors == 0)
             $display("PASS: aes_core matches the model on all %0d blocks", n);
         else

@@ -11,8 +11,18 @@
 // sends the address early, which I don't care about here.
 //
 // Everything responds OKAY. Writing to a read only register or an unmapped
-// hole is accepted and thrown away, because erroring out on AXI means DECERR
-// and that's more trouble than it's worth for a core this small.
+// hole is accepted and thrown away. A slave is allowed to answer SLVERR here,
+// I just chose not to - software is expected to poll STATUS, and one response
+// path is less to get wrong.
+//
+// DOUT is a holding register, not a window onto the core. aes_core drives
+// ciphertext straight off its state register, so reading it mid encryption
+// would hand the bus a half encrypted block and reading it before the first
+// block would hand it X. Capturing on the done edge means DOUT always holds
+// the last completed ciphertext and reads 0 out of reset.
+//
+// awprot/arprot exist because AXI4-Lite requires them. The values are
+// ignored - there's no privileged/secure split in a core this small.
 
 `timescale 1ns / 1ps
 
@@ -24,6 +34,7 @@ module aes_axi_lite #(
     input  logic                   s_axi_aresetn,   // active low, AXI style
 
     input  logic [ADDR_WIDTH-1:0]  s_axi_awaddr,
+    input  logic [2:0]             s_axi_awprot,    // required by the spec, ignored
     input  logic                   s_axi_awvalid,
     output logic                   s_axi_awready,
 
@@ -37,6 +48,7 @@ module aes_axi_lite #(
     input  logic                   s_axi_bready,
 
     input  logic [ADDR_WIDTH-1:0]  s_axi_araddr,
+    input  logic [2:0]             s_axi_arprot,    // required by the spec, ignored
     input  logic                   s_axi_arvalid,
     output logic                   s_axi_arready,
 
@@ -56,6 +68,15 @@ module aes_axi_lite #(
     localparam logic [3:0] A_DOUT0  = 4'hA;   // 0x28 .. 0x34
 
     localparam logic [1:0] RESP_OKAY = 2'b00;
+
+    // the register decode is addr[5:2], so anything above bit 5 is ignored -
+    // the interconnect has already decoded the window by then. Consequence
+    // worth knowing: with ADDR_WIDTH > 6 the 64 byte map aliases, i.e. 0x40
+    // hits CTRL again.
+    initial begin
+        if (ADDR_WIDTH < 6)
+            $fatal(1, "aes_axi_lite: ADDR_WIDTH must be >= 6 for the 64 byte map");
+    end
 
     // core hookup
     logic         rst;
@@ -88,6 +109,25 @@ module aes_axi_lite #(
     assign plaintext = {din_w[0], din_w[1], din_w[2], din_w[3]};
     assign irq       = done && irq_en;
 
+    // DOUT holding register - see the note up top. done goes high on the same
+    // edge state_reg takes the final round, so the cycle after the rising
+    // edge ciphertext is settled and safe to latch. STATUS.DONE can't be
+    // observed over the bus in under ~3 cycles, so software that polls DONE
+    // and then reads DOUT always sees the captured value.
+    logic [127:0] dout_r;
+    logic         done_d;
+
+    always_ff @(posedge s_axi_aclk) begin
+        if (!s_axi_aresetn) begin
+            dout_r <= 128'h0;
+            done_d <= 1'b0;
+        end else begin
+            done_d <= done;
+            if (done && !done_d)
+                dout_r <= ciphertext;
+        end
+    end
+
     // byte enables. AXI4-Lite masters are allowed to do partial writes so I
     // may as well honor wstrb instead of pretending it's always 4'hf
     function automatic logic [31:0] wr_bytes(input logic [31:0] old,
@@ -107,12 +147,16 @@ module aes_axi_lite #(
     logic       wr_fire;
     logic [3:0] wr_word;
 
-    assign wr_fire = (wstate == W_IDLE) && s_axi_awvalid && s_axi_wvalid;
+    // the aresetn term keeps the handshake outputs low while reset is
+    // asserted. the state regs clear synchronously, so without it a response
+    // left pending when reset hits would keep BVALID high until the next
+    // clock edge, and the spec wants VALID low during reset.
+    assign wr_fire = (wstate == W_IDLE) && s_axi_awvalid && s_axi_wvalid && s_axi_aresetn;
     assign wr_word = s_axi_awaddr[5:2];
 
     assign s_axi_awready = wr_fire;
     assign s_axi_wready  = wr_fire;
-    assign s_axi_bvalid  = (wstate == W_RESP);
+    assign s_axi_bvalid  = (wstate == W_RESP) && s_axi_aresetn;
     assign s_axi_bresp   = RESP_OKAY;
 
     always_ff @(posedge s_axi_aclk) begin
@@ -179,11 +223,11 @@ module aes_axi_lite #(
     logic [3:0] rd_word;
     logic [31:0] rd_data;
 
-    assign rd_fire = (rstate == R_IDLE) && s_axi_arvalid;
+    assign rd_fire = (rstate == R_IDLE) && s_axi_arvalid && s_axi_aresetn;
     assign rd_word = s_axi_araddr[5:2];
 
     assign s_axi_arready = rd_fire;
-    assign s_axi_rvalid  = (rstate == R_RESP);
+    assign s_axi_rvalid  = (rstate == R_RESP) && s_axi_aresetn;
     assign s_axi_rresp   = RESP_OKAY;
 
     always_comb begin
@@ -198,7 +242,7 @@ module aes_axi_lite #(
         else if (rd_word >= A_DIN0 && rd_word < A_DIN0 + 4)
             rd_data = din_w[rd_word - A_DIN0];
         else if (rd_word >= A_DOUT0 && rd_word < A_DOUT0 + 4)
-            rd_data = ciphertext[127 - 32*(rd_word - A_DOUT0) -: 32];
+            rd_data = dout_r[127 - 32*(rd_word - A_DOUT0) -: 32];
     end
 
     always_ff @(posedge s_axi_aclk) begin
