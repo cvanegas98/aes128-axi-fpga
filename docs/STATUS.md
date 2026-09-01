@@ -55,7 +55,8 @@ Phase 3 - hardware demo (first thing to cut)
 - [x] top level tying uart + bridge + aes_axi_lite together (8/31)
 - [x] basys3.xdc + vivado build script (8/31) - bitstream builds clean,
       timing met but only just, see the log
-- [ ] demo on the board  <- next thing to do, board is here
+- [x] demo on the board (9/1) - ladder + all 1000 vectors pass first try,
+      see the log
 
 Phase 4 - timing + writeup
 - [ ] SDC constraints, close timing, write up critical path + Fmax

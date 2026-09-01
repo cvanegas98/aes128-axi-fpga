@@ -9,8 +9,16 @@
 set repo [file normalize [file join [file dirname [info script]] ..]]
 set bit  [file join $repo vivado build aes_uart_top.bit]
 
+# the batch build lands in vivado/build, a gui build lands in the project's
+# runs dir. take whichever exists, batch first if both do.
+set gui_bit [file join $repo vivado aes128 aes128.runs impl_1 aes_uart_top.bit]
+if {![file exists $bit] && [file exists $gui_bit]} {
+    set bit $gui_bit
+}
+
 if {![file exists $bit]} {
-    puts "no bitstream at $bit - run vivado/build_bitstream.tcl first"
+    puts "no bitstream - run vivado/build_bitstream.tcl or Generate Bitstream"
+    puts "in the gui project first"
     exit 1
 }
 
