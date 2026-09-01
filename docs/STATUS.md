@@ -59,7 +59,8 @@ Phase 3 - hardware demo (first thing to cut)
       see the log
 
 Phase 4 - timing + writeup
-- [ ] SDC constraints, close timing, write up critical path + Fmax
+- [x] SDC constraints, close timing, write up critical path + Fmax (9/1) -
+      132 MHz, one path the whole way down, docs/timing.md has the story
 - [ ] maybe: pipelined version to compare Fmax
 - [ ] finish README
 
@@ -366,3 +367,65 @@ Phase 4 - timing + writeup
   different-every-run garbage separates a bridge bug from a link problem.
   next: plug the board in, program it, run the ladder for real. no com port
   showed up when I checked, so the board demo waits for the cable.
+- 9/1: board demo. programmed over jtag, ladder A through E passed on the
+  first try, then all 1000 random vectors - 0 failures. the whole chain
+  (uart framing, command protocol, bridge as axi master, wrapper, core) on
+  real silicon with the python model as the judge. phase 3 done.
+  then a reproducibility session, because the honest answer to "could
+  someone else clone this and get the same board" was no. I demo through
+  the gui (synthesis -> implementation -> bitstream -> hardware manager)
+  and wanted that flow to be the one that verifiably works, not just my
+  batch script:
+  - create_project.tcl enables post-place phys_opt_design on impl_1 now.
+    the default gui strategy skips that step, the batch script runs it, and
+    with half a ns of slack that gap is the difference between the two
+    flows agreeing and not.
+  - recreating the project from scratch caught a real bug: add_files treats
+    a bare string as a list, so the xdc path split on the space in
+    "Personal Projects" and project creation died. same disease as the
+    read_xdc one in build_bitstream.tcl, and it had been sitting in the
+    committed script since the xdc line was added - I never noticed because
+    I never re-sourced it. a setup script that has not been rerun from
+    scratch lately is a setup script that probably does not work.
+  - default sim top is tb_aes_uart_top, so open the project + run
+    simulation shows the whole design passing. any other tb is right click
+    -> set as top.
+  - program.tcl takes the gui bitstream when the batch one is not there.
+  - the readme actually says how to do any of this now, gui flow first.
+  verified the gui path the honest way: recreated the project and ran
+  launch_runs synth_1 / impl_1 -to_step write_bitstream, which is literally
+  what the gui buttons call. timing met, WNS +0.194 / WHS +0.117 - tighter
+  than the batch build's +0.566/+0.100 off the same rtl, same constraints,
+  same steps. that spread is placer seed, nothing else, so the readme
+  should quote "met at 100 MHz with a few tenths of a ns to spare
+  depending on the run", not one exact number. programmed the gui
+  bitstream, reran the ladder + all 1000 vectors on the board: 0 failures.
+  then clicked through the actual gui by hand end to end, same result.
+  next: phase 4. tighten the clock until it breaks to find the real Fmax,
+  write up the critical path properly.
+- 9/1 (later): the fmax sweep. vivado/fmax_sweep.tcl reruns the full flow
+  at one clock period per invocation and reports post route WNS - walk the
+  period down until it breaks. results: 8.5 and 7.6 ns met, 7.0 failed by
+  0.457 and 6.0 by 1.561, so fmax is 131.6 MHz demonstrated with the wall
+  between 7.46 and 7.6 ns. the critical path is the same key_expand
+  path at every single period (rnd counter -> round_keys mux -> sbox ->
+  xor), 75-80% routing, so the ceiling is one well understood path and a
+  pipeline register between the mux and the sbox is the targeted fix if
+  the maybe-item ever happens. full writeup in docs/timing.md.
+  two script bugs before the sweep told the truth, both worth remembering:
+  - create_clock with get_ports before synth_design throws "no open
+    design" in non-project mode - there are no ports until elaboration.
+    the override goes in a little generated xdc instead, because xdc files
+    are evaluated at synth time when the design exists.
+  - the override xdc had one shared filename, so two sweeps running in
+    parallel both got whichever period was written last - my "7 ns" run
+    was silently a second 6 ns run. the tell was two different constraints
+    returning bit-identical WNS, which is the same lesson as the tbs all
+    over again: a result that looks too consistent is a result to
+    distrust. period is in the filename now.
+  also learned: slack from a met run understates the design. vivado stops
+  optimizing the moment the constraint is met, so the failing runs are the
+  honest measurements - the floor extrapolated from the 6 ns failure
+  landed within 0.05 ns of where the wall actually is.
+  next: finish the README (block diagram, verification writeup, the
+  numbers), and decide if the pipelined comparison is worth the time.
