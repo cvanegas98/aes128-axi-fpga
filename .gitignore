@@ -16,6 +16,9 @@ vivado_project/
 # generated vivado project (recreate with vivado/create_project.tcl)
 vivado/aes128/
 
+# non project build output (recreate with vivado/build_bitstream.tcl)
+vivado/build/
+
 # xsim run from the command line
 xsim.dir/
 *.pb

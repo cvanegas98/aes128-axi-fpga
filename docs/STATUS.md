@@ -51,10 +51,11 @@ Phase 2 - AXI4-Lite wrapper
 
 Phase 3 - hardware demo (first thing to cut)
 - [x] uart_rx.sv + uart_tx.sv + tbs (8/31) - had to write these, see the log
-- [ ] UART to AXI bridge (command protocol + AXI4-Lite master)
-- [ ] top level tying uart + bridge + aes_axi_lite together
-- [ ] basys3.xdc + vivado build script
-- [ ] demo on the board
+- [x] UART to AXI bridge (command protocol + AXI4-Lite master) (8/31)
+- [x] top level tying uart + bridge + aes_axi_lite together (8/31)
+- [x] basys3.xdc + vivado build script (8/31) - bitstream builds clean,
+      timing met but only just, see the log
+- [ ] demo on the board  <- next thing to do, board is here
 
 Phase 4 - timing + writeup
 - [ ] SDC constraints, close timing, write up critical path + Fmax
@@ -273,3 +274,94 @@ Phase 4 - timing + writeup
   separate key_load/start exists for. the bridge is also a second, real rtl
   axi master to run against the slave, which is a better cross check than
   the bfm alone.
+- 8/31 (session 5): phase 3 built end to end - bridge, board top, xdc, build
+  and program scripts, host script. bitstream builds, both new tbs pass, so
+  the only thing left of phase 3 is plugging the board in.
+  uart_axi_bridge.sv is the "how software drives it" section of the register
+  map as hardware. 'K' + 16 bytes loads a key, 'E' + 16 bytes encrypts and
+  16 bytes come back, 'S' answers with the status byte. msb first everywhere,
+  same order as a hex string in the vector files, so host bytes drop straight
+  in with no swapping. two fsms: the command fsm speaks the protocol, a small
+  bus engine under it does one axi transaction at a time. anything that is
+  not K/E/S gets dropped so line noise cannot wedge it, and sticky
+  overrun/resp_err/cmd_err flags go to leds because when the serial link is
+  the thing that is broken, leds are the only output left.
+  it is also the second, real axi master I wanted against the slave - written
+  from the register map rather than from the bfm's mental model, with the
+  same IHI 0022 assertions from tb_aes_axi_lite watching it, now pointed at
+  a real rtl master instead of my bfm.
+  two things mutation testing turned up, both worth writing down:
+  - "bridge drops AWVALID before AWREADY comes back" survived every test I
+    had. the assertion for it was right - but aes_axi_lite is combinationally
+    ready, so there was never a cycle with AWVALID up and AWREADY down and
+    the property never got a chance to fire. the fix is a stall injector
+    between master and slave in the tb that hides each VALID from the slave
+    for a few cycles (hiding VALID is legal on both sides; masking READY
+    back at the master would let the two disagree about whether a handshake
+    happened). last test reruns the ladder plus 10 vectors with all five
+    channels randomly stalled, and now that mutant dies.
+  - "poll !busy instead of DONE" also passed everything, and working out why
+    led to a real bug: 'E' with no key loaded. the wrapper drops START unless
+    KEY_READY is set, so the DONE poll spins forever - board wedged, leds
+    dark, reset button the only way out. that is a real way to lose a demo.
+    the bridge reads STATUS first now and a keyless 'E' is dropped with
+    cmd_err latched, so the host just sees a timeout. new test covers it:
+    no bytes come back, cmd_err lights, bridge still answers afterwards.
+  aes_uart_top is wiring plus a two flop reset synchronizer on btnC
+  (ASYNC_REG so the tools keep the flops together). both reset polarities
+  come off the same synchronizer so they cannot disagree by a cycle. led
+  map: status bits on led[2:0], overrun/frame_err/resp_err/cmd_err on
+  led[6:3], heartbeat on led[15] so a dead clock is distinguishable from a
+  dead cipher. frame_err and overrun latch - a one cycle blink at 100 MHz
+  is invisible.
+  tbs. tb_uart_axi_bridge drives the byte interface directly with a stub
+  standing in for uart_tx - deliberately not uart_tx, same both-ends-mine
+  trap as the bfm, and the stub's busy length is a knob (0, 1 and 40 cycles
+  all tested). 53 blocks through the command protocol: ladder, fips kat,
+  key-loaded-once streaming, junk resync, K/E/S bytes inside payloads taken
+  as data, overrun, reset mid command and mid axi burst, soak, the keyless
+  'E', everything again stalled. tb_aes_uart_top is pin to pin - clk, btnC,
+  RsRx, RsTx, led and nothing else - with the serial bit banged from the 8N1
+  definition in both directions. runs at CLKS_PER_BIT=8 and checks by
+  hierarchical reference that the parameter reaches both uart modules, since
+  a divisor that only reached one of them would be invisible in a tb where
+  both sides are wrong together. its sequence is literally the bring-up
+  ladder I plan to type at the board. 13 blocks over the serial link.
+  tb bugs I wrote so I do not write them again: the bridge tb watchdog was
+  40us at first and fired on a perfectly good run - a watchdog is a test and
+  it can be wrong in both directions, both tbs sit at 2ms now. and the tx
+  stub's log array was [0:255], the soak walked off the end and ciphertexts
+  came back full of X two thirds of the way through - it is 2048 deep now
+  with an explicit overflow FAIL instead of nine confusing ones. I also
+  pulled back out a second dut instance at the real 868 divisor - it worked
+  but doubled elaboration to re-prove what tb_uart_tx already measured.
+  basys3.xdc pins only what the design uses - an unconstrained port that
+  nothing drives should be an error, not a warning to scroll past. false
+  paths on RsRx and btnC (they are asynchronous, the synchronizers are the
+  real fix, constraining them would claim a relationship that does not
+  exist) and on RsTx and the leds. CFGBVS/CONFIG_VOLTAGE are in there too,
+  write_bitstream DRC-errors without them.
+  build_bitstream.tcl is non project mode on purpose: the gui project is for
+  poking at sims and the bitstream that goes on the board should not depend
+  on whatever state it was left in. reads sources, builds, drops reports and
+  the .bit under vivado/build (gitignored). two gotchas: read_xdc treats its
+  argument as a list, so this repo's path splits on the space in "Personal
+  Projects" and vivado goes hunting for Personal.xdc - wrap it in [list].
+  and rtl/axi + rtl/uart each need their own glob, same trap
+  create_project.tcl hit on 8/27. program.tcl loads the .bit over jtag,
+  volatile on purpose while I iterate.
+  the numbers, post route with real constraints this time instead of the
+  batch synth estimate: 2410 lut / 2470 ff / 0 bram / 0 dsp. WNS +0.566,
+  WHS +0.100 - met, but only just, which is what the checklist means.
+  post synth WNS is +3.717 again, so the squeeze is all placement and
+  routing: the worst path is still in key_expand (rnd mux -> sbox -> xor
+  into round_keys), 7 logic levels but 79% of the delay is routing. phase 4
+  has a real job now instead of a hypothetical one.
+  host/board_kat.py talks the same three commands over pyserial. it runs the
+  ladder A through E and then optionally lines of random_1000.txt. the
+  ladder order is the point: A is all zero words so word order cannot be
+  what failed, B moves only the plaintext, C only the key - the first rung
+  that fails says which path is mirrored, and repeatable wrong bytes vs
+  different-every-run garbage separates a bridge bug from a link problem.
+  next: plug the board in, program it, run the ladder for real. no com port
+  showed up when I checked, so the board demo waits for the cable.

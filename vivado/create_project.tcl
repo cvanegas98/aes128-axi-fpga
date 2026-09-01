@@ -23,6 +23,12 @@ add_files [glob [file join $repo rtl *.sv] \
 add_files -fileset sim_1 [glob [file join $repo tb *.sv]]
 add_files -fileset sim_1 [glob [file join $repo vectors *.txt]]
 
+# constraints. the gui project can build a bitstream too, but the one that
+# actually goes on the board comes from vivado/build_bitstream.tcl - that one
+# does not depend on whatever state this project got left in.
+add_files -fileset constrs_1 [file join $repo constraints basys3.xdc]
+set_property top aes_uart_top [current_fileset]
+
 set_property top tb_sbox [get_filesets sim_1]
 
 # run until the tb calls $finish instead of the default 1000ns - tb_aes_core
