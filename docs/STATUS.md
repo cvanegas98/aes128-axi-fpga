@@ -9,14 +9,15 @@ every RTL module against it as I go.
 
 ## Definition of done
 
-- [ ] self-checking testbench passing the FIPS-197 known answer vectors plus
+- [x] self-checking testbench passing the FIPS-197 known answer vectors plus
       ~1000 random vectors checked against the python model
-- [ ] AXI4-Lite wrapper (control, status, 4x key, 4x data in, 4x data out,
-      done/interrupt) verified with a BFM or the Vivado AXI VIP
-- [ ] running on the Basys 3 with a UART bridge demo
-- [ ] timing closed with real constraints, critical path and Fmax written up,
-      maybe a before/after pipelining comparison
-- [ ] README with block diagram, register map, verification approach, and
+- [x] AXI4-Lite wrapper (control, status, 4x key, 4x data in, 4x data out,
+      done/interrupt) verified with a BFM or the Vivado AXI VIP (bfm +
+      protocol assertions; skipped the vip on purpose, see the 8/31 log)
+- [x] running on the Basys 3 with a UART bridge demo
+- [x] timing closed with real constraints, critical path and Fmax written up,
+      maybe a before/after pipelining comparison (pipelining still a maybe)
+- [x] README with block diagram, register map, verification approach, and
       utilization/timing numbers
 
 If I run out of time, the hardware demo and timing experiments get cut before
@@ -62,7 +63,7 @@ Phase 4 - timing + writeup
 - [x] SDC constraints, close timing, write up critical path + Fmax (9/1) -
       132 MHz, one path the whole way down, docs/timing.md has the story
 - [ ] maybe: pipelined version to compare Fmax
-- [ ] finish README
+- [x] finish README (9/1)
 
 ## Log
 
@@ -429,3 +430,16 @@ Phase 4 - timing + writeup
   landed within 0.05 ns of where the wall actually is.
   next: finish the README (block diagram, verification writeup, the
   numbers), and decide if the pipelined comparison is worth the time.
+- 9/1 (even later): the README. block diagram, register map summary
+  pointing at the real doc, the verification approach written out as the
+  rules it turned into (model as the only judge, no dut tested by its
+  sibling, mutation test everything, stress the bus not just exercise it,
+  the ladder as a diagnostic), and the numbers with docs/timing.md behind
+  them. deliberately did not bury the review story - "a fresh eyes review
+  found 4 of 5 planted bugs survived my tbs" reads better as a lesson
+  learned than it would as a thing hidden, because the fix and the
+  mutation-kill list are sitting right next to it.
+  that ticks every box in the definition of done. the only open item in
+  the whole plan is the maybe-pipelined comparison, which stays a maybe -
+  the board clock is 100 MHz and the ceiling is already characterized, so
+  it would be for curiosity, not for the writeup.

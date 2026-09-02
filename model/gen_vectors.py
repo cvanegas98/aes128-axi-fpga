@@ -4,6 +4,8 @@ Writes into vectors/:
   sbox.txt               - the 256 sbox values (for the sbox tb)
   fips197_kat.txt        - the FIPS-197 Appendix B known answer vector
   fips197_roundkeys.txt  - 11 round keys for the Appendix A key (for the key_expand tb)
+  roundkeys2.txt         - 11 round keys for the Appendix C.1 key, so the
+                           key_expand tb's second run uses a different key
   random_1000.txt        - random vectors, seeded so the files are reproducible
   roundstep.txt          - per-step vectors for the subbytes/shiftrows/mixcolumns tbs
 
